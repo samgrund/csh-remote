@@ -13,18 +13,34 @@ COMMANDS = [
     "sleep 200",
 ]
 
-# echo=True: the csh terminal also shows "[remote] <cmd>" + output.
-# The spawned csh runs under a detached pty (nobody is looking at it);
-# read_terminal() returns what a person sitting there would have seen.
-with CshRPC.spawn(echo=True) as rpc:
-    rpc.read_terminal()  # drop the startup banner/prompt from captures
+
+def connect() -> CshRPC:
+    """Start a csh with the csh_remote APM loaded and connect to it.
+
+    (To drive an already-running csh instead:
+        return CshRPC("/tmp/csh-remote.sock")   # after 'remote start' there)
+    """
+    rpc = CshRPC.spawn(echo=True)
+    rpc.read_terminal()  # drop the startup banner from later captures
+    return rpc
+
+
+def run_command(rpc: CshRPC, cmd: str):
+    """Run one command and print the result (RPC + csh terminal views)."""
+    r = rpc.execute(cmd)
+    print(f"$ {cmd}")
+    if r.output:
+        print(r.output, end="" if r.output.endswith("\n") else "\n")
+    print(f"  -> {r.status}: {r.reason}  [ret={r.ret}]")
+    term = rpc.read_terminal()  # what the csh terminal displayed
+    if term:
+        print(f"  [csh terminal] {term!r}")
+    print()
+    return r
+
+
+if __name__ == "__main__":
+    rpc = connect()
     for cmd in COMMANDS:
-        r = rpc.execute(cmd)
-        print(f"$ {cmd}")
-        if r.output:
-            print(r.output, end="" if r.output.endswith("\n") else "\n")
-        print(f"  -> {r.status}: {r.reason}  [ret={r.ret}]")
-        term = rpc.read_terminal()
-        if term:
-            print(f"  [csh terminal] {term!r}")
-        print()
+        run_command(rpc, cmd)
+    rpc.close()
