@@ -273,3 +273,12 @@ corpus classification, captured output, duration):
 Type `:help` there for built-in commands (`:intr`, `:ping`, `:eval`,
 `:term`, `:timeout`, `:raw`, ...). Ctrl-C interrupts the running
 command.
+
+For scripted automation, `test_auto.py` runs a sequence of commands
+non-interactively and exits nonzero if any of them failed:
+
+```sh
+./test_auto.py                            # built-in demo sequence
+./test_auto.py "remote status" "ping -n 1 -t 300"
+./test_auto.py --sock /tmp/csh-remote.sock ...   # drive a running csh
+```

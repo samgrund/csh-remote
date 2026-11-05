@@ -28,36 +28,25 @@ version = 1
 # Markers applied to every command, regardless of corpus entry.
 [global]
 failure = [
-	"No such command",                          # source: lib/slash/src/slash.c:499, builtins.c:43
-	"does not resolve to a valid CSP address",  # source: src/slash_csp.c:22 (bad node arg)
+	"No such command",                          
+	"does not resolve to a valid CSP address",  
 ]
 
 [[command]]
-# source: src/slash_csp.c:86-88 (slash_csp_ping)
 names = ["ping"]
 success = ["Reply in "]  # "Reply in %d [ms]"
 failure = ["No reply"]
 
 [[command]]
-# source: src/slash_csp.c:284 (slash_csp_cmp_ident, "\nIDENT %hu\n")
-#
-# NB: ident's failure paths are SILENT - csp_connect() failure, buffer
-# allocation failure and a csp_read() timeout all return SLASH_SUCCESS
-# with no output at all.  The success marker doubles as the no-output
-# check: empty output matches no marker, i.e. failure.
 names = ["ident"]
 success = ["IDENT"]
 
 [[command]]
-# source: src/slash_csp.c:319 ("missing interface name"), :331
-# ("No response"), :348 (stats table, "tx: %05...")
 names = ["ifstat"]
 success = ["tx:"]
 failure = ["No response", "missing interface name"]
 
 [[command]]
-# source: src/slash_csp.c ~397,411 (slash_csp_cmp_peek), :511
-# (slash_csp_cmp_poke), :444,465,560,580 ("No response")
 names = ["peek", "poke"]
 failure = [
 	"missing address",
@@ -68,12 +57,9 @@ failure = [
 ]
 
 [[command]]
-# source: src/param_slash.c:619,893 ("%s not found"), :764,913
-# ("invalid parameter value"); :315 ("%s not found.")
 names = ["get", "set", "list"]
 failure = ["not found", "invalid parameter value"]
 
 [[command]]
-# source: csh_remote src/main_remote.c (remote_status_cmd)
 names = ["remote status"]
 success = ["socket:"]
