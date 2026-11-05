@@ -43,6 +43,6 @@
 #define CRP_MAX_CMD_LEN 8192   /* longest accepted command line */
 #define CRP_MAX_LINE_LEN 64    /* longest accepted request line (excl. EXEC payload) */
 
-/* Environment variables (read once at APM load time) */
-#define CRP_ENV_SOCK "CSH_REMOTE_SOCK"
-#define CRP_ENV_ECHO "CSH_REMOTE_ECHO"
+/* Environment variables */
+#define CRP_ENV_SOCK "CSH_REMOTE_SOCK"  /* default path for 'remote start' */
+#define CRP_ENV_ECHO "CSH_REMOTE_ECHO"  /* 1 = echo to terminal (default) */

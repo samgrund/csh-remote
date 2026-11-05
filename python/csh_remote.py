@@ -285,10 +285,13 @@ class CshRPC:
             with os.fdopen(fd, "w") as f:
                 # NB: "apm load <path>" does NOT load that path - csh's
                 # apm load command only takes -f (filename search string)
-                # and -p (';'-separated search paths).  Using -f/-f scoped
+                # and -p (';'-separated search paths).  Using -f/-p scoped
                 # to the APM's own directory also avoids picking up
                 # unrelated (possibly stale) libcsh_*.so APMs.
                 f.write(f"apm load -f {os.path.basename(apm)} -p {os.path.dirname(apm) or '.'}\n")
+                # The APM does not listen when loaded; start it explicitly
+                # on our private socket path.
+                f.write(f"remote start {sock_path}\n")
             generated_init = init_file
         else:
             generated_init = None

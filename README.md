@@ -20,6 +20,9 @@ Features:
 
 - Execute any csh command line remotely and get its exit code plus
   everything it wrote to **stdout and stderr** (binary-safe framing).
+- **Inert when loaded** — nothing listens until you run
+  `remote start [socket path]`; `remote stop` tears it down again.
+  Switching to a different socket path at any time is supported.
 - Output is, by default, also echoed live to the interactive terminal
   (prefixed with `[remote] <command>`) so a human watching the shell
   stays in the loop. Toggle per session with `remote echo on|off`.
@@ -66,22 +69,38 @@ apm load -f csh_remote -p /path/to/csh_remote/builddir
 Put the line in your csh init file (`csh -i init.csh`) to load it at
 startup. See `init/remote.csh` for a template.
 
-Configuration (read once at load time):
+**The APM does not listen when loaded.** Start the socket server with:
 
-| Environment variable | Meaning                                             | Default                |
+```
+remote start                 # uses $CSH_REMOTE_SOCK or /tmp/csh-remote.sock
+remote start /tmp/my.sock     # explicit path (absolute, < 100 chars)
+remote stop                   # stop listening, remove the socket file
+```
+
+`remote start` is idempotent (restarting the same path is a no-op) and
+transparently switches sockets when given a new path. Already-connected
+clients keep their connections after a stop — only new ones are refused
+until the next start (this also means a client can stop and restart the
+server over its own connection, on a new path if desired).
+
+Configuration:
+
+| Environment variable | Meaning                                              | Default                |
 |----------------------|-----------------------------------------------------|------------------------|
-| `CSH_REMOTE_SOCK`    | Socket path (must be absolute, < 100 chars)         | `/tmp/csh-remote.sock` |
-| `CSH_REMOTE_ECHO`    | `1` echo remote output to the terminal, `0` silent  | `1`                    |
+| `CSH_REMOTE_SOCK`    | Default socket path for bare `remote start`          | `/tmp/csh-remote.sock` |
+| `CSH_REMOTE_ECHO`    | `1` echo remote output to the terminal, `0` silent    | `1`                    |
 
-If another server is already listening on the socket, the APM refuses to
-start (it will not steal the socket).
+If another server is already listening on the requested socket, the
+start is refused (it will not steal the socket).
 
 ## Interactive commands
 
-The plugin adds two commands to the running csh:
+The plugin adds these commands to the running csh:
 
 ```
 remote status            # socket path/state, echo mode, statistics
+remote start [path]      # start listening (see above)
+remote stop              # stop listening, remove the socket file
 remote echo <on|off>     # toggle terminal echo of remote commands
 ```
 
@@ -139,8 +158,10 @@ what the command wrote to stdout/stderr; terminal annotations such as
 
 - On `apm load`, apm_csh's default `libmain()` registers the
   `remote ...` commands (via the `slash` linker section) and calls this
-  plugin's `apm_init()`, which creates the socket and starts the server
-  thread.
+  plugin's `apm_init()`. Loading is inert: no socket is created until
+  `remote start [path]` runs, which binds the socket and spawns the
+  server thread; `remote stop` shuts the listener down (wake `accept()`
+  via `shutdown()`, join the thread, unlink the socket file).
 - Commands run through `slash_execute()` on the APM's own `struct slash`
   instance — the same approach csh's embedded Python uses — so the
   interactive instance (prompt, history, stdin) is never touched. The
@@ -162,7 +183,8 @@ python3 tests/test_e2e.py
 
 spawns a real csh under a pty, loads the plugin and exercises the
 protocol end to end (execution, capture, echo on/off, timeout,
-interrupt, stats).
+interrupt, stats, and the `remote start`/`remote stop` listener
+lifecycle).
 
 For interactive poking, `test.py` gives you a prompt that runs commands
 over the socket and shows exactly what the client gets back (exit code,

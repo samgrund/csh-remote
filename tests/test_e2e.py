@@ -8,7 +8,6 @@ Build the APM first (../configure && ../build), then run:
 Requires a csh binary (found via $CSH or PATH, fallback ~/.local/bin/csh).
 """
 import os
-import re
 import shutil
 import sys
 import threading
@@ -32,6 +31,18 @@ def check(name, cond, detail=""):
     else:
         failed += 1
         print(f"  FAIL: {name} {detail}")
+
+
+def _connect_fails(path: str) -> bool:
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(path)
+        s.close()
+        return False
+    except OSError:
+        return True
 
 
 def main():
@@ -124,6 +135,44 @@ def main():
         # 11. stats updated
         r = rpc.execute("remote status")
         check("stats counted", "commands executed:" in r.output, r.output[:300])
+
+        # 12. listener lifecycle: stop, restart on a new path over the
+        #     same (still-open) connection, then reconnect
+        old_sock = rpc.sock_path
+        new_sock = old_sock + "-2"
+
+        r = rpc.execute("remote stop")
+        check("remote stop", r.ok and "stopped listening" in r.output,
+              r.output[:120])
+        check("socket file removed", not os.path.exists(old_sock))
+        check("no new connections after stop",
+              _connect_fails(old_sock))
+
+        # the old connection survives; restart on a new path through it
+        r = rpc.execute(f"remote start {new_sock}")
+        check("remote start new path",
+              r.ok and "listening on" in r.output and new_sock in r.output,
+              r.output[:150])
+
+        with CshRPC(new_sock) as rpc2:
+            check("new client on new socket", rpc2.ping() < 1.0)
+            r = rpc2.execute("remote status")
+            check("status shows new socket",
+                  new_sock in r.output and "listening" in r.output,
+                  r.output[:150])
+            # idempotent: starting the same path again is a no-op
+            r = rpc2.execute(f"remote start {new_sock}")
+            check("remote start idempotent",
+                  r.ok and "already listening" in r.output, r.output[:120])
+            # and stopping twice in a row is fine too
+            r = rpc2.execute("remote stop")
+            check("remote stop (after restart)", r.ok, r.output[:120])
+            r = rpc2.execute("remote stop")
+            check("remote stop again",
+                  r.ok and "not listening" in r.output, r.output[:120])
+
+        # bring the server back for the spawned csh teardown
+        rpc.execute(f"remote start {new_sock}")
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

@@ -7,10 +7,20 @@
  *
  * See csh_remote_proto.h for the wire protocol.
  *
- * Loaded with:  apm load <path>/libcsh_remote.so
+ * Loaded with:  apm load -f libcsh_remote.so -p <dir>
  *
- * Configuration (environment variables, read at load time):
- *   CSH_REMOTE_SOCK   socket path            (default /tmp/csh-remote.sock)
+ * The APM is inert when loaded: it does not listen on anything until
+ * the user (or an init file) runs
+ *
+ *     remote start [socket path]
+ *
+ * and stops again with
+ *
+ *     remote stop
+ *
+ * 'remote start' without an argument uses $CSH_REMOTE_SOCK (read when
+ * the command runs), or /tmp/csh-remote.sock.  Configuration:
+ *   CSH_REMOTE_SOCK   default socket path for 'remote start'
  *   CSH_REMOTE_ECHO   1 = tee remote output to the interactive terminal
  *                                          (default), 0 = silent
  *
@@ -41,12 +51,13 @@
 
 #include "csh_remote_proto.h"
 
-#define CSH_REMOTE_VERSION "0.1.0"
+#define CSH_REMOTE_VERSION "0.2.0"
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Last/current socket path (empty until the first 'remote start') */
 static char sock_path[CRP_SOCK_PATH_MAX];
 static int listen_fd = -1;
 static volatile int server_running = 0;
@@ -54,6 +65,10 @@ static volatile int echo_enabled = 1;
 static volatile int sock_owned = 0;
 
 static pthread_t server_thread;
+static int server_thread_valid = 0;
+/* Serializes start/stop of the listener (may run from the interactive
+ * thread and from remote connections at the same time). */
+static pthread_mutex_t sock_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t exec_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* The slash context used for remote executions.  Never touches the
@@ -448,7 +463,12 @@ static void *server_loop(void *arg)
 		if (fd < 0) {
 			if (errno == EINTR)
 				continue;
-			break;
+			if (errno == EINVAL || errno == EBADF)
+				break; /* listener shut down under us */
+			/* Transient (EMFILE, ENFILE, ENOMEM, ...):
+			 * do not kill the server, back off and retry. */
+			usleep(100 * 1000);
+			continue;
 		}
 
 		pthread_t t;
@@ -521,27 +541,80 @@ static int setup_socket(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Listener start/stop (driven by the 'remote start'/'remote stop'     */
+/* commands)                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Caller must hold sock_lock.  Returns 0 on success, negative errno on
+ * failure (listener state unchanged on failure). */
+static int start_listen_locked(const char *path)
+{
+	int rc;
+
+	if (path[0] != '/' || strlen(path) >= sizeof(sock_path))
+		return -EINVAL;
+
+	snprintf(sock_path, sizeof(sock_path), "%s", path);
+
+	rc = setup_socket();
+	if (rc < 0)
+		return rc;
+
+	server_running = 1;
+	int prc = pthread_create(&server_thread, NULL, server_loop, NULL);
+	if (prc != 0) {
+		sock_cleanup();
+		close(listen_fd);
+		listen_fd = -1;
+		server_running = 0;
+		return -prc;
+	}
+	server_thread_valid = 1;
+
+	return 0;
+}
+
+/* Caller must hold sock_lock.  Never fails; a no-op when not running. */
+static void stop_listen_locked(void)
+{
+	if (!server_running)
+		return;
+
+	server_running = 0;
+
+	/* Wake the accept() loop (shutdown on a listening socket makes a
+	 * blocked accept() return on Linux), then wait for it to exit. */
+	if (listen_fd >= 0)
+		shutdown(listen_fd, SHUT_RDWR);
+	if (server_thread_valid) {
+		pthread_join(server_thread, NULL);
+		server_thread_valid = 0;
+	}
+	if (listen_fd >= 0) {
+		close(listen_fd);
+		listen_fd = -1;
+	}
+	sock_cleanup(); /* unlink the socket file if we own it */
+}
+
+/* Resolve the path for 'remote start' with no argument: $CSH_REMOTE_SOCK
+ * (read at command time) or the built-in default. */
+static const char *default_sock_path(void)
+{
+	const char *path = getenv(CRP_ENV_SOCK);
+	return (path && *path) ? path : CRP_DEFAULT_SOCK_PATH;
+}
+
+/* ------------------------------------------------------------------ */
 /* APM entry points                                                    */
 /* ------------------------------------------------------------------ */
 
 /* apm_init() is called by libapm_csh's default libmain() after the
- * slash commands below have been registered. */
+ * slash commands below have been registered.  Loading is deliberately
+ * inert: nothing is listening until 'remote start [path]' is run. */
 int apm_init(void)
 {
-	const char *path = getenv(CRP_ENV_SOCK);
 	const char *echo = getenv(CRP_ENV_ECHO);
-
-	if (path && *path)
-		snprintf(sock_path, sizeof(sock_path), "%s", path);
-	else
-		snprintf(sock_path, sizeof(sock_path), "%s", CRP_DEFAULT_SOCK_PATH);
-
-	if (sock_path[0] != '/') {
-		fprintf(stderr,
-			"csh_remote: %s must be an absolute path (got \"%s\")\n",
-			CRP_ENV_SOCK, sock_path);
-		return -1;
-	}
 
 	if (echo)
 		echo_enabled = (atoi(echo) != 0);
@@ -556,39 +629,20 @@ int apm_init(void)
 			    remote_hist_buf, sizeof(remote_hist_buf));
 	remote_slash.waitfunc = remote_waitfunc;
 
-	int rc = setup_socket();
-	if (rc < 0) {
-		if (rc == -EADDRINUSE)
-			fprintf(stderr,
-				"csh_remote: another server is already listening on %s\n",
-				sock_path);
-		else
-			fprintf(stderr, "csh_remote: cannot listen on %s: %s\n",
-				sock_path, strerror(-rc));
-		return rc;
-	}
-
 	atexit(sock_cleanup);
 
-	server_running = 1;
-	if (pthread_create(&server_thread, NULL, server_loop, NULL) != 0) {
-		sock_cleanup();
-		close(listen_fd);
-		listen_fd = -1;
-		server_running = 0;
-		fprintf(stderr, "csh_remote: failed to start server thread\n");
-		return -1;
-	}
-
-	printf("csh_remote " CSH_REMOTE_VERSION ": listening on %s\n", sock_path);
+	printf("csh_remote " CSH_REMOTE_VERSION " loaded (not listening)\n");
+	printf("Use 'remote start [%s]' to begin accepting connections\n",
+	       default_sock_path());
 	return 0;
 }
 
 void libinfo(void)
 {
-	printf("csh_remote " CSH_REMOTE_VERSION ": socket %s (%s), echo %s, "
+	printf("csh_remote " CSH_REMOTE_VERSION ": %s%s, echo %s, "
 	       "%llu commands executed (%llu failed), %llu interrupts, %llu clients\n",
-	       sock_path, server_running ? "listening" : "stopped",
+	       server_running ? "listening on " : "not listening",
+	       server_running ? sock_path : "",
 	       echo_enabled ? "on" : "off",
 	       (unsigned long long)__atomic_load_n(&stat_exec, __ATOMIC_RELAXED),
 	       (unsigned long long)__atomic_load_n(&stat_errors, __ATOMIC_RELAXED),
@@ -603,8 +657,12 @@ void libinfo(void)
 static int remote_status_cmd(struct slash *slash)
 {
 	slash_printf(slash, "csh_remote " CSH_REMOTE_VERSION "\n");
-	slash_printf(slash, "socket: %s (%s)\n", sock_path,
-		     server_running ? "listening" : "not running");
+	if (server_running)
+		slash_printf(slash, "socket: %s (listening)\n", sock_path);
+	else if (sock_path[0] != '\0')
+		slash_printf(slash, "socket: %s (not listening)\n", sock_path);
+	else
+		slash_printf(slash, "socket: not started (use 'remote start [path]')\n");
 	slash_printf(slash, "echo: %s\n", echo_enabled ? "on" : "off");
 	if (exec_active)
 		slash_printf(slash, "currently executing: %s\n", cur_cmd);
@@ -614,6 +672,78 @@ static int remote_status_cmd(struct slash *slash)
 	slash_printf(slash, "interrupts: %llu, clients: %llu\n",
 		     (unsigned long long)__atomic_load_n(&stat_intr, __ATOMIC_RELAXED),
 		     (unsigned long long)__atomic_load_n(&stat_clients, __ATOMIC_RELAXED));
+	return SLASH_SUCCESS;
+}
+
+static int remote_start_cmd(struct slash *slash)
+{
+	/* argv[0] is a separator artifact in this slash version; the real
+	 * arguments start at argv[1] (see e.g. the echo builtin). */
+	if (slash->argc > 3) {
+		slash_printf(slash, "usage: remote start [socket path]\n");
+		return SLASH_EUSAGE;
+	}
+	const char *path = (slash->argc >= 2) ? slash->argv[1]
+					     : default_sock_path();
+
+	pthread_mutex_lock(&sock_lock);
+
+	if (server_running && strcmp(sock_path, path) == 0) {
+		pthread_mutex_unlock(&sock_lock);
+		slash_printf(slash, "already listening on %s\n", sock_path);
+		return SLASH_SUCCESS;
+	}
+
+	/* Switching to a different path (or starting fresh): tear the old
+	 * listener down first so we never leak sockets or threads. */
+	if (server_running) {
+		slash_printf(slash, "stopping %s...\n", sock_path);
+		stop_listen_locked();
+	}
+
+	int rc = start_listen_locked(path);
+	pthread_mutex_unlock(&sock_lock);
+
+	if (rc < 0) {
+		if (rc == -EADDRINUSE)
+			slash_printf(slash,
+				     "remote start: another server is already "
+				     "listening on %s\n", path);
+		else if (rc == -EINVAL)
+			slash_printf(slash,
+				     "remote start: socket path must be an "
+				     "absolute path shorter than %zu "
+				     "characters (got \"%s\")\n",
+				     sizeof(sock_path), path);
+		else
+			slash_printf(slash, "remote start: cannot listen on %s: %s\n",
+				     path, strerror(-rc));
+		return SLASH_EINVAL;
+	}
+
+	slash_printf(slash, "listening on %s\n", sock_path);
+	return SLASH_SUCCESS;
+}
+
+static int remote_stop_cmd(struct slash *slash)
+{
+	char old_path[CRP_SOCK_PATH_MAX];
+
+	pthread_mutex_lock(&sock_lock);
+	int was_running = server_running;
+	snprintf(old_path, sizeof(old_path), "%s", sock_path);
+	stop_listen_locked();
+	pthread_mutex_unlock(&sock_lock);
+
+	if (!was_running) {
+		slash_printf(slash, "not listening%s\n",
+			     old_path[0] ? " (already stopped)" : "");
+		return SLASH_SUCCESS;
+	}
+
+	slash_printf(slash, "stopped listening on %s\n", old_path);
+	/* Note: already-connected clients keep their connections until they
+	 * close them; the socket file is removed so no new ones arrive. */
 	return SLASH_SUCCESS;
 }
 
@@ -643,5 +773,8 @@ static int remote_echo_cmd(struct slash *slash)
 }
 
 slash_command_sub(remote, status, remote_status_cmd, "", "Show csh_remote server status")
+slash_command_sub(remote, start, remote_start_cmd, "[socket path]",
+		  "Start listening (default path: $CSH_REMOTE_SOCK or /tmp/csh-remote.sock)")
+slash_command_sub(remote, stop, remote_stop_cmd, "", "Stop listening and remove the socket file")
 slash_command_sub(remote, echo, remote_echo_cmd, "<on|off>",
 		  "Enable/disable echoing remote command output to this terminal")

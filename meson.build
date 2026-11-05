@@ -1,7 +1,7 @@
 project('csh_remote', 'c',
 	subproject_dir: 'lib',
 	meson_version: '>= 1.6',
-	version: '0.1.0',
+	version: '0.2.0',
 	default_options: [
 		'buildtype=debug',
 		'optimization=2',
