@@ -13,10 +13,17 @@ COMMANDS = [
     "sleep 200",
 ]
 
-with CshRPC.spawn(echo=False) as rpc:
+# echo=True: the csh terminal also shows "[remote] <cmd>" + output.
+# The spawned csh runs under a detached pty (nobody is looking at it);
+# read_terminal() returns what a person sitting there would have seen.
+with CshRPC.spawn(echo=True) as rpc:
     for cmd in COMMANDS:
         r = rpc.execute(cmd)
         print(f"$ {cmd}")
         if r.output:
             print(r.output, end="" if r.output.endswith("\n") else "\n")
-        print(f"  -> {r.status}: {r.reason}  [ret={r.ret}]\n")
+        print(f"  -> {r.status}: {r.reason}  [ret={r.ret}]")
+        term = rpc.read_terminal()
+        if term:
+            print(f"  [csh terminal] {term!r}")
+        print()
