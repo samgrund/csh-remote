@@ -1,0 +1,65 @@
+# csh_remote command corpus.
+#
+# Success/failure markers used by CshRPC.execute(eval=True) to classify a
+# command's outcome beyond the slash exit code.  csh returns
+# SLASH_SUCCESS for most operational failures (e.g. a `ping` with no
+# reply still exits 0), so the exit code alone cannot be trusted.
+#
+# Matching (all plain substring matches against the captured output):
+#   1. ret != 0                                    -> failure (exit code)
+#   2. a failure marker (entry's + global) matched -> failure
+#   3. success markers defined but none matched    -> failure
+#   4. otherwise, with a matching corpus entry     -> success
+#      without a matching corpus entry             -> unknown
+#      (ok then falls back to ret == 0)
+#
+# `names` are matched against the first word(s) of the command line,
+# longest match wins (so "remote status" picks its own entry, not a
+# hypothetical "remote" one).
+#
+# Extend by adding [[command]] entries.  Every marker below is a
+# verbatim string printed by csh (or this APM); the '# source:'
+# comments cite where it is printed so markers can be re-verified
+# after a csh update.  Set $CSH_REMOTE_CORPUS to use a different
+# corpus file altogether.
+
+version = 1
+
+# Markers applied to every command, regardless of corpus entry.
+[global]
+failure = [
+	"No such command",                          # source: lib/slash/src/slash.c:499, builtins.c:43
+	"does not resolve to a valid CSP address",  # source: src/slash_csp.c:22 (bad node arg)
+]
+
+[[command]]
+# source: src/slash_csp.c:86-88 (slash_csp_ping)
+names = ["ping"]
+success = ["Reply in "]  # "Reply in %d [ms]"
+failure = ["No reply"]
+
+[[command]]
+# source: src/slash_csp.c:90,102 (slash_csp_cmp_ident / slash_csp_cmp_ifstat)
+names = ["ident", "ifstat"]
+failure = ["No response", "missing interface name"]
+
+[[command]]
+# source: src/slash_csp.c:~397,411 (slash_csp_cmp_peek), :511 (slash_csp_cmp_poke)
+names = ["peek", "poke"]
+failure = [
+	"missing address",
+	"Failed to parse address",
+	"missing length",
+	"Failed to parse length",
+]
+
+[[command]]
+# source: src/param_slash.c:619,893 ("%s not found"), :764,913
+# ("invalid parameter value"); :315 ("%s not found.")
+names = ["get", "set", "list"]
+failure = ["not found", "invalid parameter value"]
+
+[[command]]
+# source: csh_remote src/main_remote.c (remote_status_cmd)
+names = ["remote status"]
+success = ["socket:"]

@@ -137,6 +137,75 @@ at a specific `libcsh_remote.so`.
 command and raises `CshTimeout` (with any partial output) while leaving
 the connection usable.
 
+## Command evaluation (corpus)
+
+csh's exit code only says that a command **parsed and ran** — most
+operational failures still return `SLASH_SUCCESS`. A ping to a dead
+node, for example, exits 0 and reports the failure purely in its text
+output:
+
+```
+csh> ping -n 1 -t 1000
+Ping node 1 size 0 timeout 1000: No reply      # ret is still 0!
+```
+
+To make results trustworthy, `execute()` (with `eval=True`, the
+default) classifies the output against a **command corpus** of
+success/failure markers defined in `python/corpus.toml`:
+
+```python
+r = rpc.execute("ping -n 1 -t 1000")
+r.ret      # 0                 - raw slash exit code, unchanged
+r.status   # "failure"         - "success" | "failure" | "unknown"
+r.reason   # "failure marker 'No reply'"
+r.ok       # False             - corpus-aware
+```
+
+Evaluation order (all markers are plain substring matches):
+
+1. `ret != 0` → **failure** (exit code)
+2. a failure marker (the command's + the global ones) appears in the
+   output → **failure** (reason names the marker)
+3. success markers are defined for the command but none appears →
+   **failure**
+4. otherwise, with a corpus entry → **success**; without one →
+   **unknown** (`ok` then falls back to `ret == 0`)
+
+`execute(..., eval=False)` disables all of this and restores the raw
+semantics (`ok == (ret == 0)`). `CshTimeout` results are never
+corpus-evaluated.
+
+### Extending the corpus
+
+Add a `[[command]]` entry to `python/corpus.toml`:
+
+```toml
+[[command]]
+names = ["ping"]           # first word(s) of the command line,
+success = ["Reply in "]    # longest match wins ("remote status" style)
+failure = ["No reply"]
+```
+
+- `names` may list several names for one entry and may be multi-word
+  (matched against the first word(s) of the command line).
+- `[global]` failure markers apply to every command.
+- Every marker must be a **verbatim string** that csh actually prints;
+  keep the `# source:` comments pointing at the csh file so markers can
+  be re-verified after a csh update.
+- `load_corpus(path)` validates and reloads a corpus at runtime
+  (malformed files raise `CshRemoteError` naming the offending key —
+  the corpus never degrades to silently passing commands as
+  successful).
+- Set `$CSH_REMOTE_CORPUS` to use a different corpus file altogether.
+
+Evaluation is a heuristic: a command whose failure wording is not in
+the corpus comes back `unknown`, never a false `success` — curating the
+corpus is how you close that gap, command by command.
+
+`test.py` shows the classification in its status line
+(`── ret=0 (FAILURE (failure marker 'No reply')) in 1.00s ──`) and can
+toggle it live with `:eval on|off` (or `--eval off` at startup).
+
 ## Wire protocol
 
 `src/csh_remote_proto.h` documents the protocol in full. Summary:
@@ -183,17 +252,18 @@ python3 tests/test_e2e.py
 
 spawns a real csh under a pty, loads the plugin and exercises the
 protocol end to end (execution, capture, echo on/off, timeout,
-interrupt, stats, and the `remote start`/`remote stop` listener
-lifecycle).
+interrupt, stats, the `remote start`/`remote stop` listener lifecycle,
+and corpus evaluation).
 
 For interactive poking, `test.py` gives you a prompt that runs commands
 over the socket and shows exactly what the client gets back (exit code,
-captured output, duration):
+corpus classification, captured output, duration):
 
 ```sh
 ./test.py                 # attach to a running csh's socket
 ./test.py --spawn         # or start a dedicated csh and drive it
 ```
 
-Type `:help` there for built-in commands (`:intr`, `:ping`, `:term`,
-`:timeout`, `:raw`, ...). Ctrl-C interrupts the running command.
+Type `:help` there for built-in commands (`:intr`, `:ping`, `:eval`,
+`:term`, `:timeout`, `:raw`, ...). Ctrl-C interrupts the running
+command.

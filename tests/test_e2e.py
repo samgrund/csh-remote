@@ -10,12 +10,18 @@ Requires a csh binary (found via $CSH or PATH, fallback ~/.local/bin/csh).
 import os
 import shutil
 import sys
+import tempfile
 import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python"))
-from csh_remote import CshRPC, CshTimeout  # noqa: E402
+from csh_remote import (  # noqa: E402
+    CshRPC,
+    CshRemoteError,
+    CshTimeout,
+    load_corpus,
+)
 
 APM = os.path.join(ROOT, "builddir", "libcsh_remote.so")
 CSH = os.environ.get("CSH") or shutil.which("csh") or os.path.expanduser("~/.local/bin/csh")
@@ -173,6 +179,65 @@ def main():
 
         # bring the server back for the spawned csh teardown
         rpc.execute(f"remote start {new_sock}")
+
+        # 13. corpus evaluation (execute(eval=True), the default).
+        #     There is no CSP network here, so ping always fails in its
+        #     text output while still exiting 0 - the exact trap the
+        #     corpus exists to catch.
+        r = rpc.execute("ping -n 1 -t 500 -s 0")
+        check("ping dead node ret==0", r.ret == 0,
+              f"ret={r.ret} out={r.output[:80]}")
+        check("ping dead node status failure", r.status == "failure",
+              f"status={r.status}")
+        check("ping dead node reason names marker", "No reply" in r.reason,
+              r.reason)
+        check("ping dead node ok False", r.ok is False, f"ok={r.ok}")
+
+        r = rpc.execute("remote status")
+        check("remote status eval success",
+              r.status == "success" and "socket:" in r.reason,
+              f"status={r.status} reason={r.reason}")
+
+        r = rpc.execute("sleep 200")
+        check("command without corpus entry is unknown",
+              r.status == "unknown" and r.ok,
+              f"status={r.status} ok={r.ok}")
+
+        # eval=False restores the raw semantics (the original trap:
+        # ret==0 counts as ok even though the ping failed)
+        r = rpc.execute("ping -n 1 -t 500 -s 0", eval=False)
+        check("eval=False raw semantics",
+              r.status == "unknown" and r.ok and r.ret == 0,
+              f"status={r.status} ok={r.ok}")
+
+        # custom corpus via load_corpus()
+        fd, custom = tempfile.mkstemp(suffix=".toml", prefix="csh-corpus-")
+        with os.fdopen(fd, "w") as f:
+            f.write('version = 1\n\n[[command]]\nnames = ["help"]\n'
+                    'success = ["definitely-not-in-help-output"]\n')
+        load_corpus(custom)
+        r = rpc.execute("help")
+        check("custom corpus applied",
+              r.status == "failure" and "no success marker" in r.reason,
+              f"status={r.status} reason={r.reason}")
+
+        # malformed corpus is rejected loudly (never silently permissive)
+        fd, bad = tempfile.mkstemp(suffix=".toml", prefix="csh-corpus-")
+        with os.fdopen(fd, "w") as f:
+            f.write("version = 2\n")
+        try:
+            load_corpus(bad)
+            check("malformed corpus rejected", False, "no error raised")
+        except CshRemoteError as e:
+            check("malformed corpus rejected", "version" in str(e), str(e))
+
+        # restore the default corpus (also verifies the reload path)
+        load_corpus()
+        r = rpc.execute("remote status")
+        check("default corpus restored", r.status == "success",
+              f"status={r.status} reason={r.reason}")
+        os.unlink(custom)
+        os.unlink(bad)
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

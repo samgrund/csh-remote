@@ -42,6 +42,7 @@ Built-in commands (anything else is sent to csh as-is):
   :ping               liveness probe (round-trip latency)
   :status             run 'remote status' in csh
   :echo on|off        run 'remote echo on/off' in csh (terminal echo)
+  :eval on|off        toggle corpus evaluation of results (default: on)
   :term               show what the csh terminal displays (spawn mode)
   :timeout [s|none]   default execute timeout (default: none)
   :raw                toggle repr() display of captured output
@@ -53,6 +54,10 @@ Notes:
     is retrieved afterwards; the connection stays in sync).
   - CshTimeout is raised (with partial output) if :timeout is set and
     the command does not finish in time.
+  - With eval on, the status line classifies the command via the corpus
+    in python/corpus.toml (SUCCESS / FAILURE (reason)); csh's exit code
+    alone says nothing about operational success (a failed ping is
+    ret=0). With eval off it falls back to ok/ERROR on ret.
 """
 
 
@@ -62,11 +67,12 @@ def dim(text: str) -> str:
     return "\033[2m" + text + "\033[0m"
 
 
-def execute(rpc: CshRPC, cmd: str, timeout: float | None) -> CommandResult:
+def execute(rpc: CshRPC, cmd: str, timeout: float | None,
+           eval: bool = True) -> CommandResult:
     """execute() with local Ctrl-C support: interrupt the running command
     and still consume its response so the protocol stream stays in sync."""
     try:
-        return rpc.execute(cmd, timeout=timeout)
+        return rpc.execute(cmd, timeout=timeout, eval=eval)
     except KeyboardInterrupt:
         try:
             rpc.interrupt()
@@ -96,8 +102,13 @@ def show(result: CommandResult, raw: bool, note: str = "") -> None:
     if note:
         print(dim(note))
     dur = f"{result.duration:.2f}s" if result.duration >= 0 else "?"
-    print(dim(f"── ret={result.ret} ({'ok' if result.ok else 'ERROR'}) "
-              f"in {dur} ──"))
+    if result.status == "failure":
+        state = f"FAILURE ({result.reason})"
+    elif result.status == "success":
+        state = "SUCCESS"
+    else:  # unknown: no corpus entry, or eval off
+        state = "ok" if result.ok else "ERROR"
+    print(dim(f"── ret={result.ret} ({state}) in {dur} ──"))
 
 
 def connect_or_spawn(args) -> tuple[CshRPC, bool]:
@@ -135,6 +146,9 @@ def main() -> int:
     parser.add_argument("--echo", choices=("on", "off"), default="on",
                         help="echo remote output in the csh terminal "
                              "(--spawn only, default: on)")
+    parser.add_argument("--eval", choices=("on", "off"), default="on",
+                        help="evaluate results against python/corpus.toml "
+                             "(default: on)")
     parser.add_argument("--timeout", default="none",
                         help="default per-command timeout in seconds "
                              "('none' = wait forever)")
@@ -149,6 +163,7 @@ def main() -> int:
 
     rpc, spawned = connect_or_spawn(args)
     raw = False
+    do_eval = args.eval == "on"
 
     print(f"csh_remote test harness - socket {rpc.sock_path} "
           f"({'spawned csh' if spawned else 'attached'})")
@@ -186,12 +201,19 @@ def main() -> int:
                     rpc.interrupt()
                     print("INTR sent")
                 elif op == ":status":
-                    show(rpc.execute("remote status"), raw)
+                    show(rpc.execute("remote status", eval=do_eval), raw)
                 elif op == ":echo":
                     if arg not in ("on", "off"):
                         print("usage: :echo on|off")
                     else:
-                        show(rpc.execute(f"remote echo {arg}"), raw)
+                        show(rpc.execute(f"remote echo {arg}", eval=do_eval),
+                             raw)
+                elif op == ":eval":
+                    if arg not in ("on", "off"):
+                        print("usage: :eval on|off")
+                    else:
+                        do_eval = arg == "on"
+                        print(f"corpus evaluation: {arg}")
                 elif op == ":term":
                     if not spawned:
                         print(dim("(only available in --spawn mode - "
@@ -220,7 +242,7 @@ def main() -> int:
 
         # csh command
         try:
-            result = execute(rpc, cmd, timeout)
+            result = execute(rpc, cmd, timeout, eval=do_eval)
         except KeyboardInterrupt:
             print(dim("aborted"))
             continue
