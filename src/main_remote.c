@@ -664,12 +664,14 @@ static int remote_status_cmd(struct slash *slash)
 	else
 		slash_printf(slash, "socket: not started (use 'remote start [path]')\n");
 	slash_printf(slash, "echo: %s\n", echo_enabled ? "on" : "off");
-	if (exec_active)
+	/* Don't report ourselves as the executing command - a remotely
+	 * run 'remote status' would always show itself. */
+	if (exec_active && strcmp(cur_cmd, "remote status") != 0)
 		slash_printf(slash, "currently executing: %s\n", cur_cmd);
-	slash_printf(slash, "commands executed: %llu (%llu failed)\n",
+	slash_printf(slash, "commands executed: %llu (%llu failed), "
+			    "interrupts: %llu, clients: %llu\n",
 		     (unsigned long long)__atomic_load_n(&stat_exec, __ATOMIC_RELAXED),
-		     (unsigned long long)__atomic_load_n(&stat_errors, __ATOMIC_RELAXED));
-	slash_printf(slash, "interrupts: %llu, clients: %llu\n",
+		     (unsigned long long)__atomic_load_n(&stat_errors, __ATOMIC_RELAXED),
 		     (unsigned long long)__atomic_load_n(&stat_intr, __ATOMIC_RELAXED),
 		     (unsigned long long)__atomic_load_n(&stat_clients, __ATOMIC_RELAXED));
 	return SLASH_SUCCESS;

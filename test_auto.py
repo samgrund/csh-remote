@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Minimal scripted automation: spawn a csh, run hardcoded commands."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "python"))
@@ -12,6 +13,15 @@ COMMANDS = [
     "ident -n 1 -t 300",  # unreachable node -> silent failure
     "sleep 200",
 ]
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _clean(text: str) -> str:
+    """Make captured terminal output readable: strip ANSI escapes
+    and carriage returns, drop blank lines."""
+    text = _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
+    return "\n".join(ln for ln in text.splitlines() if ln.strip())
 
 
 def connect() -> CshRPC:
@@ -26,15 +36,22 @@ def connect() -> CshRPC:
 
 
 def run_command(rpc: CshRPC, cmd: str):
-    """Run one command and print the result (RPC + csh terminal views)."""
+    """Run one command; print its output, verdict and terminal view."""
     r = rpc.execute(cmd)
     print(f"$ {cmd}")
     if r.output:
         print(r.output, end="" if r.output.endswith("\n") else "\n")
-    print(f"  -> {r.status}: {r.reason}  [ret={r.ret}]")
-    term = rpc.read_terminal()  # what the csh terminal displayed
+    if r.status == "failure":
+        print(f"  -> FAILED - {r.reason}  [{r.duration:.2f}s, ret={r.ret}]")
+    elif r.status == "success":
+        print(f"  -> OK  [{r.duration:.2f}s]")
+    else:
+        print(f"  -> unknown (no corpus entry)  [{r.duration:.2f}s, ret={r.ret}]")
+    term = _clean(rpc.read_terminal())  # what the csh terminal displayed
     if term:
-        print(f"  [csh terminal] {term!r}")
+        print("  csh terminal:")
+        for line in term.splitlines():
+            print(f"    {line}")
     print()
     return r
 
