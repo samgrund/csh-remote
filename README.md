@@ -163,3 +163,15 @@ python3 tests/test_e2e.py
 spawns a real csh under a pty, loads the plugin and exercises the
 protocol end to end (execution, capture, echo on/off, timeout,
 interrupt, stats).
+
+For interactive poking, `test.py` gives you a prompt that runs commands
+over the socket and shows exactly what the client gets back (exit code,
+captured output, duration):
+
+```sh
+./test.py                 # attach to a running csh's socket
+./test.py --spawn         # or start a dedicated csh and drive it
+```
+
+Type `:help` there for built-in commands (`:intr`, `:ping`, `:term`,
+`:timeout`, `:raw`, ...). Ctrl-C interrupts the running command.
