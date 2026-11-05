@@ -171,6 +171,12 @@ Evaluation order (all markers are plain substring matches):
 4. otherwise, with a corpus entry → **success**; without one →
    **unknown** (`ok` then falls back to `ret == 0`)
 
+Success markers also catch commands that fail **silently**: `ident` to
+an unreachable node exits 0 with *no output at all* (csh's connect and
+read timeouts print nothing), so its corpus entry requires the `IDENT`
+header of a real response — empty output matches no marker and is
+reported as a failure.
+
 `execute(..., eval=False)` disables all of this and restores the raw
 semantics (`ok == (ret == 0)`). `CshTimeout` results are never
 corpus-evaluated.

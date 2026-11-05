@@ -198,6 +198,27 @@ def main():
               r.status == "success" and "socket:" in r.reason,
               f"status={r.status} reason={r.reason}")
 
+        # ident to an unreachable node fails SILENTLY: ret 0, no output
+        # at all (csp_connect/csp_read failures in slash_csp.c print
+        # nothing). The corpus's success marker catches this: empty
+        # output matches nothing.
+        r = rpc.execute("ident -n 1 -t 300")
+        check("ident dead node ret==0, silent",
+              r.ret == 0 and r.output == "",
+              f"ret={r.ret} out={r.output[:60]!r}")
+        check("ident dead node status failure", r.status == "failure",
+              f"status={r.status}")
+        check("ident dead node ok False", r.ok is False, f"ok={r.ok}")
+
+        # ident to node 0 (self) - the spawned csh answers its own CMP
+        # request, and the success marker "IDENT" is present.  (Explicit
+        # -n 0 because an earlier test ran 'node 5', which changed the
+        # session's default node.)
+        r = rpc.execute("ident -n 0 -t 1000")
+        check("ident self eval success",
+              r.status == "success" and "IDENT" in r.output,
+              f"status={r.status} out={r.output[:60]!r}")
+
         r = rpc.execute("sleep 200")
         check("command without corpus entry is unknown",
               r.status == "unknown" and r.ok,

@@ -39,18 +39,32 @@ success = ["Reply in "]  # "Reply in %d [ms]"
 failure = ["No reply"]
 
 [[command]]
-# source: src/slash_csp.c:90,102 (slash_csp_cmp_ident / slash_csp_cmp_ifstat)
-names = ["ident", "ifstat"]
+# source: src/slash_csp.c:284 (slash_csp_cmp_ident, "\nIDENT %hu\n")
+#
+# NB: ident's failure paths are SILENT - csp_connect() failure, buffer
+# allocation failure and a csp_read() timeout all return SLASH_SUCCESS
+# with no output at all.  The success marker doubles as the no-output
+# check: empty output matches no marker, i.e. failure.
+names = ["ident"]
+success = ["IDENT"]
+
+[[command]]
+# source: src/slash_csp.c:319 ("missing interface name"), :331
+# ("No response"), :348 (stats table, "tx: %05...")
+names = ["ifstat"]
+success = ["tx:"]
 failure = ["No response", "missing interface name"]
 
 [[command]]
-# source: src/slash_csp.c:~397,411 (slash_csp_cmp_peek), :511 (slash_csp_cmp_poke)
+# source: src/slash_csp.c ~397,411 (slash_csp_cmp_peek), :511
+# (slash_csp_cmp_poke), :444,465,560,580 ("No response")
 names = ["peek", "poke"]
 failure = [
 	"missing address",
 	"Failed to parse address",
 	"missing length",
 	"Failed to parse length",
+	"No response",
 ]
 
 [[command]]
