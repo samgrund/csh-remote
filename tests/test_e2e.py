@@ -6,9 +6,16 @@ Build the APM first (../configure && ../build), then run:
     python3 tests/test_e2e.py
 
 Requires a csh binary (found via $CSH or PATH, fallback ~/.local/bin/csh).
+
+The client library only connects; this test brings its own csh: the
+SpawnedCsh harness below starts a csh under a pty with the APM loaded
+and 'remote start' run, so the tests exercise the connect-only client
+API exactly as a user would.
 """
 import os
+import select
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -51,13 +58,134 @@ def _connect_fails(path: str) -> bool:
         return True
 
 
+class SpawnedCsh:
+    """Test harness: a csh under a pty with the csh_remote APM loaded
+    and its listener started, plus a connected CshRPC client.
+
+    (This lives here, not in the client library - the library only
+    connects to running csh sessions.)
+    """
+
+    def __init__(self, csh: str, apm: str, sock_path: str,
+                 echo: bool = True, connect_timeout: float = 15.0):
+        import pty
+
+        # Init file: load the APM (csh's 'apm load' takes -f <name
+        # substring> and -p <search paths>, not a file path) and start
+        # its listener on our private socket.
+        fd, init_file = tempfile.mkstemp(suffix=".csh", prefix="csh-remote-init-")
+        with os.fdopen(fd, "w") as f:
+            f.write(f"apm load -f {os.path.basename(apm)} "
+                    f"-p {os.path.dirname(apm) or '.'}\n")
+            f.write(f"remote start {sock_path}\n")
+
+        env = dict(os.environ)
+        env["CSH_REMOTE_SOCK"] = sock_path
+        env["CSH_REMOTE_ECHO"] = "1" if echo else "0"
+
+        master, slave = pty.openpty()
+        try:
+            self._proc = subprocess.Popen(
+                [csh, "-i", init_file], stdin=slave, stdout=slave,
+                stderr=slave, env=env, start_new_session=True, close_fds=True)
+        finally:
+            os.close(slave)
+
+        self._master = master
+        self._log = bytearray()
+        self._tmp_paths = [sock_path, init_file]
+        self.rpc = None
+        try:
+            deadline = time.monotonic() + connect_timeout
+            while True:
+                self._drain()
+                if self._proc.poll() is not None:
+                    self._drain()
+                    tail = bytes(self._log[-2000:]).decode("utf-8", "replace")
+                    raise CshRemoteError(f"csh exited during startup:\n{tail}")
+                try:
+                    self.rpc = CshRPC.connect(sock_path, timeout=1.0)
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    if time.monotonic() >= deadline:
+                        raise CshRemoteError(
+                            f"csh_remote socket {sock_path} did not appear "
+                            f"within {connect_timeout}s") from None
+                    time.sleep(0.1)
+        except Exception:
+            self.close()
+            raise
+
+    def _drain(self) -> None:
+        while True:
+            ready, _, _ = select.select([self._master], [], [], 0)
+            if not ready:
+                return
+            try:
+                chunk = os.read(self._master, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self._log.extend(chunk)
+            if len(self._log) > 256 * 1024:
+                del self._log[:128 * 1024]
+
+    def read_terminal(self) -> str:
+        """Everything the csh terminal displayed since the last call
+        (what a human sitting there would have seen)."""
+        self._drain()
+        out = bytes(self._log).decode("utf-8", errors="replace")
+        self._log.clear()
+        return out
+
+    def close(self) -> None:
+        if self.rpc is not None:
+            try:
+                self.rpc.close()
+            except OSError:
+                pass
+            self.rpc = None
+        master, self._master = self._master, None
+        if master is not None:
+            try:
+                os.write(master, b"exit\n")
+            except OSError:
+                pass
+        if self._proc is not None:
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+        if master is not None:
+            try:
+                os.close(master)
+            except OSError:
+                pass
+        for path in self._tmp_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self._tmp_paths = []
+
+    def __enter__(self) -> "SpawnedCsh":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
 def main():
     if not os.path.isfile(APM):
         sys.exit(f"APM not built: {APM} (run ./configure && ./build first)")
     if not os.path.isfile(CSH):
         sys.exit(f"csh binary not found: {CSH}")
 
-    with CshRPC.spawn(csh=CSH, apm_path=APM, echo=True) as rpc:
+    sock = f"/tmp/csh-remote-test-{os.getpid()}.sock"
+    with SpawnedCsh(CSH, APM, sock) as spawned:
+        rpc = spawned.rpc
         # 1. liveness
         lat = rpc.ping()
         check("ping", lat < 1.0, f"lat={lat}")
@@ -89,17 +217,17 @@ def main():
         #     (checks use the raw byte log: every echo is one atomic pty
         #     write, so the substrings stay contiguous even when the
         #     interactive prompt redraw interleaves between writes)
-        rpc.read_terminal()  # clear
+        spawned.read_terminal()  # clear
         rpc.execute("help")
-        term = rpc.read_terminal()
+        term = spawned.read_terminal()
         check("echo shows [remote] prefix", "[remote] help" in term, term[-200:])
         check("echo shows command output", "remote status" in term, term[-400:])
 
         # 7. echo off
         rpc.execute("remote echo off")
-        rpc.read_terminal()
+        spawned.read_terminal()
         rpc.execute("help")
-        term = rpc.read_terminal()
+        term = spawned.read_terminal()
         check("echo off hides prefix", "[remote]" not in term, term[-200:])
         rpc.execute("remote echo on")
 
@@ -160,7 +288,7 @@ def main():
               r.ok and "listening on" in r.output and new_sock in r.output,
               r.output[:150])
 
-        with CshRPC(new_sock) as rpc2:
+        with CshRPC.connect(new_sock) as rpc2:
             check("new client on new socket", rpc2.ping() < 1.0)
             r = rpc2.execute("remote status")
             check("status shows new socket",

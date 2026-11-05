@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Minimal scripted automation: spawn a csh, run hardcoded commands."""
+"""Minimal scripted automation: connect to a running csh, run commands.
+
+The csh session must have the csh_remote APM loaded and its listener
+started ('remote start'); see init/remote.csh for an init-file template.
+"""
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "python"))
@@ -14,29 +17,14 @@ COMMANDS = [
     "sleep 200",
 ]
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-
-
-def _clean(text: str) -> str:
-    """Make captured terminal output readable: strip ANSI escapes
-    and carriage returns, drop blank lines."""
-    text = _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
-    return "\n".join(ln for ln in text.splitlines() if ln.strip())
-
 
 def connect() -> CshRPC:
-    """Start a csh with the csh_remote APM loaded and connect to it.
-
-    (To drive an already-running csh instead:
-        return CshRPC("/tmp/csh-remote.sock")   # after 'remote start' there)
-    """
-    rpc = CshRPC.spawn(echo=True)
-    rpc.read_terminal()  # drop the startup banner from later captures
-    return rpc
+    """Connect to a running csh ($CSH_REMOTE_SOCK or /tmp/csh-remote.sock)."""
+    return CshRPC.connect()
 
 
 def run_command(rpc: CshRPC, cmd: str):
-    """Run one command; print its output, verdict and terminal view."""
+    """Run one command; print its output and verdict."""
     r = rpc.execute(cmd)
     print(f"$ {cmd}")
     if r.output:
@@ -47,11 +35,6 @@ def run_command(rpc: CshRPC, cmd: str):
         print(f"  -> OK  [{r.duration:.2f}s]")
     else:
         print(f"  -> unknown (no corpus entry)  [{r.duration:.2f}s, ret={r.ret}]")
-    term = _clean(rpc.read_terminal())  # what the csh terminal displayed
-    if term:
-        print("  csh terminal:")
-        for line in term.splitlines():
-            print(f"    {line}")
     print()
     return r
 

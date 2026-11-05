@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """Interactive harness for csh_remote.
 
-Send commands to a csh instance over its csh_remote socket and see exactly
-what the client gets back (exit code, captured output, duration).
+Connect to a running csh over its csh_remote socket and see exactly what
+the client gets back (exit code, corpus classification, captured output,
+duration).  The csh session must have the APM loaded and its listener
+started ('remote start') - see init/remote.csh.
 
-Attach to an already-running csh (socket path from --sock or
-$CSH_REMOTE_SOCK, default /tmp/csh-remote.sock):
-
-    ./test.py
-
-Or spawn a dedicated csh under a pty with the APM loaded:
-
-    ./test.py --spawn                 # echoes [remote] output in its terminal
-    ./test.py --spawn --echo off      # silent
+    ./test.py                       # socket from --sock or $CSH_REMOTE_SOCK
+    ./test.py --sock /tmp/my.sock
 
 Anything typed at the prompt is executed in csh; commands starting with
 ':' are handled locally (see ':help'). Ctrl-C interrupts the running
@@ -22,9 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "python"))
 from csh_remote import (  # noqa: E402
@@ -43,7 +36,6 @@ Built-in commands (anything else is sent to csh as-is):
   :status             run 'remote status' in csh
   :echo on|off        run 'remote echo on/off' in csh (terminal echo)
   :eval on|off        toggle corpus evaluation of results (default: on)
-  :term               show what the csh terminal displays (spawn mode)
   :timeout [s|none]   default execute timeout (default: none)
   :raw                toggle repr() display of captured output
   :help               this help
@@ -111,41 +103,13 @@ def show(result: CommandResult, raw: bool, note: str = "") -> None:
     print(dim(f"── ret={result.ret} ({state}) in {dur} ──"))
 
 
-def connect_or_spawn(args) -> tuple[CshRPC, bool]:
-    if args.spawn:
-        csh = args.csh or shutil.which("csh") or os.path.expanduser("~/.local/bin/csh")
-        sock = args.sock if args.sock != DEFAULT_SOCK_PATH else None
-        rpc = CshRPC.spawn(csh=csh, apm_path=args.apm, init_file=args.init,
-                           sock_path=sock, echo=args.echo == "on")
-        return rpc, True
-    try:
-        return CshRPC(args.sock, connect_timeout=1.0), False
-    except (OSError, CshRemoteError) as e:
-        sys.exit(f"cannot connect to {args.sock} ({e})\n"
-                 f"Is csh running with the csh_remote APM loaded?\n"
-                 f"(or use: {sys.argv[0]} --spawn  to start a dedicated csh)")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Interactively drive a csh instance over csh_remote.")
+        description="Interactively drive a running csh over csh_remote.")
     parser.add_argument("--sock", default=os.environ.get("CSH_REMOTE_SOCK",
                                                          DEFAULT_SOCK_PATH),
                         help="socket path (default: $CSH_REMOTE_SOCK or %s)"
                              % DEFAULT_SOCK_PATH)
-    parser.add_argument("--spawn", action="store_true",
-                        help="spawn a dedicated csh under a pty instead of "
-                             "connecting to an existing socket")
-    parser.add_argument("--csh", default=None,
-                        help="csh binary to spawn (default: csh from PATH)")
-    parser.add_argument("--apm", default=None,
-                        help="path to libcsh_remote.so for --spawn "
-                             "(default: auto-detected)")
-    parser.add_argument("--init", default=None,
-                        help="csh init file for --spawn (must load the APM)")
-    parser.add_argument("--echo", choices=("on", "off"), default="on",
-                        help="echo remote output in the csh terminal "
-                             "(--spawn only, default: on)")
     parser.add_argument("--eval", choices=("on", "off"), default="on",
                         help="evaluate results against python/corpus.toml "
                              "(default: on)")
@@ -161,18 +125,22 @@ def main() -> int:
     except ValueError:
         sys.exit(f"invalid --timeout value: {args.timeout!r}")
 
-    rpc, spawned = connect_or_spawn(args)
-    raw = False
-    do_eval = args.eval == "on"
+    try:
+        rpc = CshRPC.connect(args.sock, timeout=1.0)
+    except (OSError, CshRemoteError):
+        sys.exit(f"cannot connect to {args.sock}\n"
+                 f"Is csh running with the csh_remote APM loaded and\n"
+                 f"'remote start' issued? (see init/remote.csh)")
 
-    print(f"csh_remote test harness - socket {rpc.sock_path} "
-          f"({'spawned csh' if spawned else 'attached'})")
+    do_eval = args.eval == "on"
+    raw = False
+
+    print(f"csh_remote test harness - socket {rpc.sock_path}")
     print("Type ':help' for built-in commands, Ctrl-D to quit.\n")
 
-    prompt = "csh(spawn)> " if spawned else "csh> "
     while True:
         try:
-            line = input(prompt)
+            line = input("csh> ")
         except KeyboardInterrupt:
             # at the prompt: just clear the line
             print()
@@ -214,13 +182,6 @@ def main() -> int:
                     else:
                         do_eval = arg == "on"
                         print(f"corpus evaluation: {arg}")
-                elif op == ":term":
-                    if not spawned:
-                        print(dim("(only available in --spawn mode - "
-                                  "there is no terminal to read)"))
-                    else:
-                        text = rpc.read_terminal()
-                        print(text if text else dim("(terminal is quiet)"))
                 elif op == ":timeout":
                     if arg.lower() in ("none", "off", ""):
                         timeout = None
@@ -259,8 +220,6 @@ def main() -> int:
         show(result, raw)
 
     rpc.close()
-    if spawned:
-        print(dim("spawned csh exited; socket removed"))
     return 0
 
 

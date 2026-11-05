@@ -109,33 +109,29 @@ remote echo <on|off>     # toggle terminal echo of remote commands
 
 ## Python client
 
-`python/csh_remote.py` is a single-module, stdlib-only client:
+`python/csh_remote.py` is a single-module, stdlib-only client. It only
+**connects** — it never starts or owns a csh. Point it at a csh session
+that has the APM loaded and its listener started (`remote start`, e.g.
+from the init file in `init/remote.csh`):
 
 ```python
 from csh_remote import CshRPC
 
-# Drive an already-running csh that loaded the APM:
-rpc = CshRPC("/tmp/csh-remote.sock")
-result = rpc.execute("help")
-print(result.ret, result.ok, result.output)
-rpc.interrupt()      # if a previous command is stuck
-rpc.close()
-
-# Or spawn a dedicated csh under a pty and drive it (replaces
-# tmux send-keys automation):
-with CshRPC.spawn(echo=False) as rpc:
-    print(rpc.execute("ident").output)
-    rpc.interrupt()
-    print(rpc.read_terminal())   # what a human would have seen
+# Connect to a running csh ($CSH_REMOTE_SOCK or /tmp/csh-remote.sock):
+with CshRPC.connect("/tmp/csh-remote.sock") as rpc:
+    result = rpc.execute("help")
+    print(result.ret, result.ok, result.output)
+    rpc.interrupt()      # if a previous command is stuck
 ```
 
-`CshRPC.spawn()` searches for the plugin in `~/.local/lib/csh/` and
-`../builddir/` (relative to the module), or set `CSH_REMOTE_APM` to point
-at a specific `libcsh_remote.so`.
+With echo enabled on the csh side (the default), a human watching that
+csh sees `[remote] <command>` plus the output live, while Python reads
+the same bytes from the socket — no pty scraping, no tmux.
 
 `execute()` accepts an optional `timeout`; on expiry it interrupts the
 command and raises `CshTimeout` (with any partial output) while leaving
-the connection usable.
+the connection usable. `reconnect()` re-establishes the link after
+`close()` or a listener restart.
 
 ## Command evaluation (corpus)
 
@@ -256,27 +252,27 @@ With the plugin built:
 python3 tests/test_e2e.py
 ```
 
-spawns a real csh under a pty, loads the plugin and exercises the
+starts a real csh under a pty (its own test harness - the client
+library itself only connects), loads the plugin and exercises the
 protocol end to end (execution, capture, echo on/off, timeout,
 interrupt, stats, the `remote start`/`remote stop` listener lifecycle,
 and corpus evaluation).
 
 For interactive poking, `test.py` gives you a prompt that runs commands
-over the socket and shows exactly what the client gets back (exit code,
-corpus classification, captured output, duration):
+over the socket of a running csh and shows exactly what the client gets
+back (exit code, corpus classification, captured output, duration):
 
 ```sh
-./test.py                 # attach to a running csh's socket
-./test.py --spawn         # or start a dedicated csh and drive it
+./test.py                              # $CSH_REMOTE_SOCK or /tmp/csh-remote.sock
+./test.py --sock /tmp/my.sock
 ```
 
 Type `:help` there for built-in commands (`:intr`, `:ping`, `:eval`,
-`:term`, `:timeout`, `:raw`, ...). Ctrl-C interrupts the running
-command.
+`:timeout`, `:raw`, ...). Ctrl-C interrupts the running command.
 
 For scripted automation, `test_auto.py` is the minimal template —
-spawn a csh, run a hardcoded list of commands, print each result's
-corpus classification:
+connect to a running csh, run a hardcoded list of commands, print each
+result's corpus classification:
 
 ```sh
 ./test_auto.py     # edit COMMANDS at the top for your own sequence
