@@ -17,6 +17,7 @@ COMMANDS = [
 # The spawned csh runs under a detached pty (nobody is looking at it);
 # read_terminal() returns what a person sitting there would have seen.
 with CshRPC.spawn(echo=True) as rpc:
+    rpc.read_terminal()  # drop the startup banner/prompt from captures
     for cmd in COMMANDS:
         r = rpc.execute(cmd)
         print(f"$ {cmd}")
