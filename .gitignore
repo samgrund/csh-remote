@@ -1,0 +1,5 @@
+builddir/
+lib/.wraplock
+__pycache__/
+*.pyc
+*.sock

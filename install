@@ -1,0 +1,2 @@
+#!/bin/sh
+meson install -C builddir --skip-subprojects
