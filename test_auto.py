@@ -12,23 +12,20 @@ from csh_remote import CshRPC  # noqa: E402
 
 COMMANDS = [
     "remote status",
-    "ping -n 1 -t 300",   # no CSP network -> "No reply" (but ret 0!)
-    "ident -n 1 -t 300",  # unreachable node -> silent failure
+    "ping",   # no CSP network -> "No reply" (but ret 0!)
+    "ident",  # unreachable node -> silent failure
+    "time",
     "sleep 200",
+    "time",
+    "pull",
 ]
-
-
-def connect() -> CshRPC:
-    """Connect to a running csh ($CSH_REMOTE_SOCK or /tmp/csh-remote.sock)."""
-    return CshRPC.connect()
-
 
 def run_command(rpc: CshRPC, cmd: str):
     """Run one command; print its output and verdict."""
     r = rpc.execute(cmd)
     print(f"$ {cmd}")
     if r.output:
-        print(r.output, end="" if r.output.endswith("\n") else "\n")
+        print(r.output)
     if r.status == "failure":
         print(f"  -> FAILED - {r.reason}  [{r.duration:.2f}s, ret={r.ret}]")
     elif r.status == "success":
@@ -40,7 +37,7 @@ def run_command(rpc: CshRPC, cmd: str):
 
 
 if __name__ == "__main__":
-    rpc = connect()
+    rpc = CshRPC.connect()
     for cmd in COMMANDS:
         run_command(rpc, cmd)
     rpc.close()

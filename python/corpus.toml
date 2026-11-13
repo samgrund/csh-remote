@@ -63,3 +63,7 @@ failure = ["not found", "invalid parameter value"]
 [[command]]
 names = ["remote status"]
 success = ["socket:"]
+
+[[command]]
+names = ["pull"]
+success = [":0"]
